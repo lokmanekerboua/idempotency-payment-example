@@ -1,0 +1,122 @@
+spring:
+  application:
+    name: idempotency-payment-api
+
+  datasource:
+    url: ${DATABASE_URL:jdbc:postgresql://localhost:5432/payment_db}
+    username: ${DATABASE_USERNAME:payment_user}
+    password: ${DATABASE_PASSWORD:payment_password}
+    driver-class-name: org.postgresql.Driver
+    hikari:
+      maximum-pool-size: 20
+      minimum-idle: 5
+      connection-timeout: 30000
+      idle-timeout: 600000
+      max-lifetime: 1800000
+
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    open-in-view: false
+    properties:
+      hibernate:
+        dialect: org.hibernate.dialect.PostgreSQLDialect
+        format_sql: true
+        default_schema: public
+        jdbc:
+          time_zone: UTC
+    show-sql: false
+
+  flyway:
+    enabled: true
+    baseline-on-migrate: true
+    locations: classpath:db/migration
+    validate-on-migrate: true
+
+  security:
+    oauth2:
+      resourceserver:
+        jwt:
+          issuer-uri: ${JWT_ISSUER_URI:http://localhost:8080}
+
+server:
+  port: ${SERVER_PORT:8080}
+  error:
+    include-message: always
+    include-binding-errors: always
+    include-stacktrace: on_param
+    include-exception: false
+
+app:
+  payments:
+    idempotency:
+      retention: 72h
+      processing-timeout: 5m
+      key-ttl: 7d
+    reconciliation:
+      enabled: true
+      batch-size: 50
+      interval: 30s
+      max-retry-attempts: 5
+      backoff-base-ms: 1000
+    provider:
+      mode: ${STRIPE_MODE:stripe-test}
+      api-key: ${STRIPE_API_KEY:}
+      webhook-secret: ${STRIPE_WEBHOOK_SECRET:}
+      timeout-seconds: 30
+      retry-config:
+        max-retries: 3
+        initial-backoff-ms: 500
+        max-backoff-ms: 5000
+    jwt:
+      secret: ${JWT_SECRET:your-secret-key-must-be-at-least-256-bits-long-for-hs256-algorithm}
+      expiration: 24h
+      refresh-expiration: 7d
+    outbox:
+      enabled: true
+      batch-size: 100
+      interval: 10s
+      max-retry-attempts: 10
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics,prometheus
+      base-path: /actuator
+  endpoint:
+    health:
+      show-details: when_authorized
+      show-components: always
+  metrics:
+    export:
+      prometheus:
+        enabled: true
+    tags:
+      application: ${spring.application.name}
+    distribution:
+      percentiles-histogram:
+        http.server.requests: true
+      slo:
+        http.server.requests: 100ms,200ms,500ms,1s,2s
+
+logging:
+  level:
+    root: INFO
+    me.lokmvne.idempotency: DEBUG
+    org.springframework.security: DEBUG
+    org.hibernate.SQL: DEBUG
+    org.hibernate.type.descriptor.sql.BasicBinder: TRACE
+  pattern:
+    console: "%d{yyyy-MM-dd HH:mm:ss.SSS} [%thread] %-5level %logger{36} - [%X{correlationId}] %msg%n"
+    file: "%d{yyyy-MM-dd HH:mm:ss.SSS} [%thread] %-5level %logger{36} - [%X{correlationId}] %msg%n"
+  file:
+    name: logs/payment-api.log
+
+springdoc:
+  api-docs:
+    path: /api-docs
+  swagger-ui:
+    path: /swagger-ui.html
+    enabled: true
+  show-actuator: false

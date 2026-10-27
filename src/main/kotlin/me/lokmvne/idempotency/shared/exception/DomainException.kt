@@ -1,0 +1,6 @@
+package me.lokmvne.idempotency.shared.exception
+
+abstract class DomainException(
+    message: String,
+    cause: Throwable? = null
+) : RuntimeException(message, cause)
