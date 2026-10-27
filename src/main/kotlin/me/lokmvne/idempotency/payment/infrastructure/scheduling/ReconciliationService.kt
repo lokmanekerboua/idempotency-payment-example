@@ -25,13 +25,16 @@ class ReconciliationService(
     private val refundRepository: RefundRepository,
     private val paymentProviderPort: PaymentProviderPort,
     private val idempotencyService: IdempotencyService,
-    private val paymentProperties: PaymentProperties
+    private val paymentProperties: PaymentProperties,
+    private val attemptGuard: me.lokmvne.idempotency.payment.application.service.PaymentAttemptGuard,
+    private val objectMapper: com.fasterxml.jackson.databind.ObjectMapper
 ) {
     private val logger = LoggerFactory.getLogger(ReconciliationService::class.java)
     private val workerId = "reconciliation-worker-${UUID.randomUUID()}"
 
+    @Transactional
     @Scheduled(
-        fixedDelayString = "\${app.payments.reconciliation.interval.toMillis()}",
+        fixedDelayString = "\${app.payments.reconciliation.interval}",
         initialDelay = 60000
     )
     fun reconcileStaleOperations() {
@@ -96,14 +99,16 @@ class ReconciliationService(
         val paymentId = record.resourceId
         if (paymentId == null) {
             logger.warn("Payment operation ${record.id} has no resource ID")
-            idempotencyService.markAsFailed(record.id)
+            // A missing local reference cannot prove that Stripe did not act.
+            idempotencyService.releaseLease(record.id)
             return
         }
 
-        val payment = paymentRepository.findById(paymentId).orElse(null)
+        val payment = paymentRepository.findByIdWithLock(paymentId)
         if (payment == null) {
             logger.warn("Payment not found for operation ${record.id}")
-            idempotencyService.markAsFailed(record.id)
+            // A missing local reference cannot prove that Stripe did not act.
+            idempotencyService.releaseLease(record.id)
             return
         }
 
@@ -114,17 +119,36 @@ class ReconciliationService(
         }
 
         if (payment.providerPaymentId == null) {
-            logger.warn("Payment ${payment.id} has no provider payment ID")
-            payment.status = PaymentStatus.FAILED
-            payment.failureCode = "NO_PROVIDER_ID"
-            payment.failureMessage = "Payment created but no provider ID assigned"
-            paymentRepository.save(payment)
-            idempotencyService.markAsFailed(record.id)
+            // Stripe may remove keys after 24 hours. Do not make a fresh create call near or after that boundary.
+            if (record.createdAt.isBefore(Instant.now().minusSeconds(23 * 60 * 60))) {
+                logger.error("Payment {} needs manual reconciliation: provider key is too old", payment.id)
+                idempotencyService.releaseLease(record.id)
+                return
+            }
+            try {
+                val result = paymentProviderPort.createPaymentIntent(
+                    PaymentProviderPort.CreatePaymentIntentRequest(
+                        amountCents = payment.amountCents, currency = payment.currency, orderId = payment.orderId,
+                        providerIdempotencyKey = requireNotNull(payment.providerIdempotencyKey),
+                        metadata = mapOf("order_id" to payment.orderId.toString(), "payment_id" to payment.id.toString())
+                    )
+                )
+                payment.providerPaymentId = result.providerPaymentId
+                payment.status = mapStripeStatusToPaymentStatus(result.status)
+                paymentRepository.save(payment)
+                if (payment.status == PaymentStatus.CANCELED) attemptGuard.releaseForCanceled(payment)
+                idempotencyService.markAsCompleted(record.id, 201, objectMapper.writeValueAsString(mapOf(
+                    "paymentId" to payment.id, "clientSecret" to result.clientSecret, "status" to payment.status.name
+                )), payment.id)
+            } catch (e: Exception) {
+                logger.error("Payment {} remains uncertain; same-key recovery failed", payment.id, e)
+                idempotencyService.releaseLease(record.id)
+            }
             return
         }
 
         try {
-            val providerStatus = paymentProviderPort.retrievePaymentIntent(payment.providerPaymentId)
+            val providerStatus = paymentProviderPort.retrievePaymentIntent(requireNotNull(payment.providerPaymentId))
             val mappedStatus = mapStripeStatusToPaymentStatus(providerStatus.status)
 
             if (payment.status != mappedStatus) {
@@ -133,6 +157,7 @@ class ReconciliationService(
                 logger.info("Updated payment ${payment.id} status to $mappedStatus from provider")
             }
 
+            if (payment.status == PaymentStatus.CANCELED) attemptGuard.releaseForCanceled(payment)
             if (payment.isTerminal()) {
                 markIdempotencyAsCompleted(record, payment)
             } else {
@@ -151,14 +176,16 @@ class ReconciliationService(
         val refundId = record.resourceId
         if (refundId == null) {
             logger.warn("Refund operation ${record.id} has no resource ID")
-            idempotencyService.markAsFailed(record.id)
+            // A missing local reference cannot prove that Stripe did not act.
+            idempotencyService.releaseLease(record.id)
             return
         }
 
-        val refund = refundRepository.findById(refundId).orElse(null)
+        val refund = refundRepository.findByIdWithLock(refundId)
         if (refund == null) {
             logger.warn("Refund not found for operation ${record.id}")
-            idempotencyService.markAsFailed(record.id)
+            // A missing local reference cannot prove that Stripe did not act.
+            idempotencyService.releaseLease(record.id)
             return
         }
 
@@ -169,15 +196,44 @@ class ReconciliationService(
         }
 
         if (refund.providerRefundId == null) {
-            logger.warn("Refund ${refund.id} has no provider refund ID")
-            refund.status = me.lokmvne.idempotency.refund.domain.enum.RefundStatus.FAILED
-            refundRepository.save(refund)
-            idempotencyService.markAsFailed(record.id)
+            if (record.createdAt.isBefore(Instant.now().minusSeconds(23 * 60 * 60))) {
+                logger.error("Refund {} needs manual reconciliation: provider key is too old", refund.id)
+                idempotencyService.releaseLease(record.id)
+                return
+            }
+            try {
+                val payment = paymentRepository.findById(refund.paymentId).orElseThrow()
+                val result = paymentProviderPort.createRefund(PaymentProviderPort.CreateRefundRequest(
+                    providerPaymentId = requireNotNull(payment.providerPaymentId), amountCents = refund.amountCents,
+                    providerIdempotencyKey = requireNotNull(refund.providerIdempotencyKey),
+                    metadata = mapOf("payment_id" to refund.paymentId.toString(), "refund_id" to refund.id.toString())
+                ))
+                refund.providerRefundId = result.providerRefundId
+                refund.status = when (result.status) {
+                    "succeeded" -> me.lokmvne.idempotency.refund.domain.enum.RefundStatus.SUCCEEDED
+                    "failed" -> me.lokmvne.idempotency.refund.domain.enum.RefundStatus.FAILED
+                    "canceled" -> me.lokmvne.idempotency.refund.domain.enum.RefundStatus.CANCELED
+                    else -> me.lokmvne.idempotency.refund.domain.enum.RefundStatus.PENDING
+                }
+                refundRepository.save(refund)
+                markRefundIdempotencyAsCompleted(record, refund)
+            } catch (e: Exception) {
+                logger.error("Refund {} remains uncertain; same-key recovery failed", refund.id, e)
+                idempotencyService.releaseLease(record.id)
+            }
             return
         }
 
-        logger.info("Refund reconciliation completed for ${refund.id}")
-        idempotencyService.releaseLease(record.id)
+        val providerStatus = paymentProviderPort.retrieveRefundStatus(refund.providerRefundId!!)
+        refund.status = when (providerStatus) {
+            "succeeded" -> me.lokmvne.idempotency.refund.domain.enum.RefundStatus.SUCCEEDED
+            "failed" -> me.lokmvne.idempotency.refund.domain.enum.RefundStatus.FAILED
+            "canceled" -> me.lokmvne.idempotency.refund.domain.enum.RefundStatus.CANCELED
+            else -> me.lokmvne.idempotency.refund.domain.enum.RefundStatus.PENDING
+        }
+        refundRepository.save(refund)
+        if (refund.isTerminal()) markRefundIdempotencyAsCompleted(record, refund)
+        else idempotencyService.releaseLease(record.id)
     }
 
     private fun markRefundIdempotencyAsCompleted(record: IdempotencyRecordEntity, refund: RefundEntity) {

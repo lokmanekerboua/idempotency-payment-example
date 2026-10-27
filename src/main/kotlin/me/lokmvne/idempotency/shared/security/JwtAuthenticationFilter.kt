@@ -41,12 +41,12 @@ class JwtAuthenticationFilter(
             val userId = claims.subject
 
             if (userId != null && SecurityContextHolder.getContext().authentication == null) {
-                val authorities = claims["roles"] as? List<*>
+                val authorities = (claims["roles"] as? List<*>)
                     ?.map { SimpleGrantedAuthority(it.toString()) }
                     ?: emptyList()
 
                 val authToken = UsernamePasswordAuthenticationToken(
-                    userId,
+                    org.springframework.security.core.userdetails.User(userId, "", authorities),
                     null,
                     authorities
                 )
@@ -62,10 +62,10 @@ class JwtAuthenticationFilter(
 
     private fun parseToken(token: String): Claims {
         val key = Keys.hmacShaKeyFor(jwtProperties.jwt.secret.toByteArray(StandardCharsets.UTF_8))
-        return Jwts.parserBuilder()
-            .setSigningKey(key)
+        return Jwts.parser()
+            .verifyWith(key)
             .build()
-            .parseClaimsJws(token)
-            .body
+            .parseSignedClaims(token)
+            .payload
     }
 }

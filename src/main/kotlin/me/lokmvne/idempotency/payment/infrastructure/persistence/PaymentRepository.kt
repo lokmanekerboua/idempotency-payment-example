@@ -15,6 +15,10 @@ interface PaymentRepository : JpaRepository<PaymentEntity, UUID> {
     fun findByOrderIdAndStatus(orderId: UUID, status: PaymentStatus): List<PaymentEntity>
 
     @Lock(LockModeType.PESSIMISTIC_WRITE)
+    @Query("SELECT p FROM PaymentEntity p WHERE p.providerPaymentId = :providerId")
+    fun findByProviderPaymentIdWithLock(@Param("providerId") providerId: String): PaymentEntity?
+
+    @Lock(LockModeType.PESSIMISTIC_WRITE)
     @Query("SELECT p FROM PaymentEntity p WHERE p.id = :id")
     fun findByIdWithLock(@Param("id") id: UUID): PaymentEntity?
 

@@ -21,7 +21,7 @@ class OpenApiConfig {
                 Info()
                     .title("Payment API")
                     .version("1.0")
-                    .description("Production-grade payment processing API with idempotency support")
+                    .description("Payment API with durable payment and refund attempts, provider idempotency and reconciliation. Experimental: not validated for production.")
                     .license(
                         License()
                             .name("MIT")

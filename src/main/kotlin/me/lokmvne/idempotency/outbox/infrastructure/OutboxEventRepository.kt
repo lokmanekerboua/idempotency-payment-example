@@ -10,15 +10,14 @@ import java.util.UUID
 import jakarta.persistence.LockModeType
 
 interface OutboxEventRepository : JpaRepository<OutboxEventEntity, UUID> {
-    @Lock(LockModeType.PESSIMISTIC_WRITE)
-    @Query(
+    @Query(value = 
         """
-        SELECT o FROM OutboxEventEntity o
-        WHERE o.status = 'PENDING'
-        ORDER BY o.createdAt ASC
+        SELECT * FROM outbox_events
+        WHERE status = 'PENDING'
+        ORDER BY created_at ASC
         LIMIT :limit
         FOR UPDATE SKIP LOCKED
-        """
+        """, nativeQuery = true
     )
     fun findPendingEventsForProcessing(@Param("limit") limit: Int): List<OutboxEventEntity>
 

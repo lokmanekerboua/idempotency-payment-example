@@ -204,6 +204,10 @@ class PaymentController(
         return ResponseEntity.ok(response)
     }
 
+    @ExceptionHandler(me.lokmvne.idempotency.payment.application.service.PaymentAttemptAlreadyExistsException::class)
+    fun handleExistingAttempt(ex: RuntimeException): ResponseEntity<Map<String, String?>> =
+        ResponseEntity.status(HttpStatus.CONFLICT).body(mapOf("type" to "payment-attempt-exists", "detail" to ex.message))
+
     @ExceptionHandler(IdempotencyKeyConflictException::class)
     fun handleIdempotencyConflict(ex: IdempotencyKeyConflictException): ResponseEntity<out Map<String, Any?>?> {
         return ResponseEntity.status(HttpStatus.CONFLICT).body(

@@ -1,6 +1,5 @@
 package me.lokmvne.idempotency.webhook.infrastructure.persistence
 
-import me.lokmvne.idempotency.webhook.infrastructure.persistence.WebhookEventEntity.WebhookProcessingStatus
 import org.springframework.data.jpa.repository.JpaRepository
 import org.springframework.data.jpa.repository.Modifying
 import org.springframework.data.jpa.repository.Lock
@@ -17,17 +16,15 @@ interface WebhookEventRepository : JpaRepository<WebhookEventEntity, UUID> {
 
     fun findByProcessingStatus(status: WebhookProcessingStatus): List<WebhookEventEntity>
 
-    @Lock(LockModeType.PESSIMISTIC_WRITE)
-    @Query(
-        """
-        SELECT w FROM WebhookEventEntity w
-        WHERE w.processingStatus = 'PENDING'
-        ORDER BY w.receivedAt ASC
-        LIMIT :limit
-        FOR UPDATE SKIP LOCKED
-        """
-    )
-    fun findPendingEventsForProcessing(@Param("limit") limit: Int): List<WebhookEventEntity>
+    @Modifying
+    @Query(value = """
+        INSERT INTO webhook_events (id, provider, provider_event_id, event_type, provider_object_id, payload, processing_status, received_at, attempt_count)
+        VALUES (:id, 'stripe', :eventId, :eventType, :objectId, :payload, 'PENDING', now(), 0)
+        ON CONFLICT (provider, provider_event_id) DO NOTHING
+    """, nativeQuery = true)
+    fun insertIfAbsent(@Param("id") id: UUID, @Param("eventId") eventId: String,
+                       @Param("eventType") eventType: String, @Param("objectId") objectId: String?,
+                       @Param("payload") payload: String): Int
 
     @Modifying
     @Query(

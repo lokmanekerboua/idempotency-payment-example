@@ -1,11 +1,13 @@
 spring:
+  config:
+    import: optional:file:.env[.properties]
   application:
     name: idempotency-payment-api
 
   datasource:
-    url: ${DATABASE_URL:jdbc:postgresql://localhost:5432/payment_db}
-    username: ${DATABASE_USERNAME:payment_user}
-    password: ${DATABASE_PASSWORD:payment_password}
+    url: ${DATABASE_URL}
+    username: ${DATABASE_USERNAME}
+    password: ${DATABASE_PASSWORD}
     driver-class-name: org.postgresql.Driver
     hikari:
       maximum-pool-size: 20
@@ -69,7 +71,7 @@ app:
         initial-backoff-ms: 500
         max-backoff-ms: 5000
     jwt:
-      secret: ${JWT_SECRET:your-secret-key-must-be-at-least-256-bits-long-for-hs256-algorithm}
+      secret: ${JWT_SECRET}
       expiration: 24h
       refresh-expiration: 7d
     outbox:
@@ -84,29 +86,40 @@ management:
       exposure:
         include: health,info,metrics,prometheus
       base-path: /actuator
+
   endpoint:
     health:
       show-details: when_authorized
       show-components: always
-  metrics:
-    export:
-      prometheus:
+
+  prometheus:
+    metrics:
+      export:
         enabled: true
+
+  metrics:
     tags:
       application: ${spring.application.name}
+
     distribution:
       percentiles-histogram:
-        http.server.requests: true
+        "[http.server.requests]": true
+
       slo:
-        http.server.requests: 100ms,200ms,500ms,1s,2s
+        "[http.server.requests]":
+          - 100ms
+          - 200ms
+          - 500ms
+          - 1s
+          - 2s
 
 logging:
   level:
     root: INFO
-    me.lokmvne.idempotency: DEBUG
-    org.springframework.security: DEBUG
-    org.hibernate.SQL: DEBUG
-    org.hibernate.type.descriptor.sql.BasicBinder: TRACE
+    me.lokmvne.idempotency: INFO
+    org.springframework.security: INFO
+    org.hibernate.SQL: INFO
+    org.hibernate.type.descriptor.sql.BasicBinder: INFO
   pattern:
     console: "%d{yyyy-MM-dd HH:mm:ss.SSS} [%thread] %-5level %logger{36} - [%X{correlationId}] %msg%n"
     file: "%d{yyyy-MM-dd HH:mm:ss.SSS} [%thread] %-5level %logger{36} - [%X{correlationId}] %msg%n"

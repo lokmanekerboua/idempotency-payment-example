@@ -5,15 +5,15 @@ services:
     image: postgres:17-alpine
     container_name: payment-postgres
     environment:
-      POSTGRES_DB: payment_db
-      POSTGRES_USER: payment_user
-      POSTGRES_PASSWORD: payment_password
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${DATABASE_USERNAME}
+      POSTGRES_PASSWORD: ${DATABASE_PASSWORD}
     ports:
       - "5432:5432"
     volumes:
       - postgres-data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U payment_user -d payment_db"]
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -26,13 +26,13 @@ services:
       dockerfile: Dockerfile
     container_name: payment-api
     environment:
-      DATABASE_URL: jdbc:postgresql://postgres:5432/payment_db
-      DATABASE_USERNAME: payment_user
-      DATABASE_PASSWORD: payment_password
-      STRIPE_API_KEY: ${STRIPE_API_KEY:-sk_test_placeholder}
-      STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET:-whsec_placeholder}
+      DATABASE_URL: jdbc:postgresql://postgres:5432/${POSTGRES_DB}
+      DATABASE_USERNAME: ${DATABASE_USERNAME}
+      DATABASE_PASSWORD: ${DATABASE_PASSWORD}
+      STRIPE_API_KEY: ${STRIPE_API_KEY}
+      STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET}
       STRIPE_MODE: stripe-test
-      JWT_SECRET: ${JWT_SECRET:-your-secret-key-must-be-at-least-256-bits-long-for-hs256-algorithm}
+      JWT_SECRET: ${JWT_SECRET}
       JWT_ISSUER_URI: http://localhost:8080
       SERVER_PORT: 8080
     ports:

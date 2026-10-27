@@ -43,8 +43,9 @@ class OutboxService(
         logger.debug("Published outbox event: $eventType for aggregate $aggregateType:$aggregateId")
     }
 
+    @Transactional
     @Scheduled(
-        fixedDelayString = "\${app.payments.outbox.interval.toMillis()}",
+        fixedDelayString = "\${app.payments.outbox.interval}",
         initialDelay = 30000
     )
     fun processPendingEvents() {

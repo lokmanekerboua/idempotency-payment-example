@@ -29,6 +29,9 @@ class PaymentService(
     private val paymentProviderPort: PaymentProviderPort,
     private val objectMapper: ObjectMapper,
     private val outboxService: me.lokmvne.idempotency.outbox.application.service.OutboxService,
+    private val attemptGuard: PaymentAttemptGuard,
+    private val idempotencyRecordRepository: me.lokmvne.idempotency.idempotency.infrastructure.persistence.IdempotencyRecordRepository,
+    private val tx: org.springframework.transaction.support.TransactionTemplate,
     private val metricsService: me.lokmvne.idempotency.shared.logging.MetricsService
 ) {
     private val logger = LoggerFactory.getLogger(PaymentService::class.java)
@@ -39,7 +42,6 @@ class PaymentService(
         val isCached: Boolean
     )
 
-    @Transactional
     fun createPayment(
         command: CreatePaymentCommand,
         idempotencyKey: UUID
@@ -47,6 +49,15 @@ class PaymentService(
         val startTime = System.currentTimeMillis()
 
         val userId = command.userId
+
+        val reservation = idempotencyService.reserveIdempotencyKey(
+            userId = userId,
+            operationType = OperationType.CREATE_PAYMENT,
+            idempotencyKey = idempotencyKey,
+            requestParameters = mapOf(
+                "orderId" to command.orderId.toString()
+            )
+        )
 
         val cachedResponse = idempotencyService.getCachedResponse(
             userId = userId,
@@ -65,106 +76,57 @@ class PaymentService(
             )
         }
 
-        val reservation = idempotencyService.reserveIdempotencyKey(
-            userId = userId,
-            operationType = OperationType.CREATE_PAYMENT,
-            idempotencyKey = idempotencyKey,
-            requestParameters = mapOf(
-                "orderId" to command.orderId.toString()
-            )
-        )
-
         if (!reservation.isNew) {
             metricsService.incrementIdempotencyConflicts()
             throw IdempotencyKeyConflictException(userId, OperationType.CREATE_PAYMENT.name, idempotencyKey)
         }
 
-        metricsService.incrementPaymentCreated()
-
-        val order = loadOrderWithLock(command.orderId)
-        validateOrderForPayment(order)
-
-        val providerIdempotencyKey = "${reservation.record.id}_${command.orderId}"
-
-        val paymentEntity = PaymentEntity(
-            orderId = command.orderId,
-            userId = userId,
-            amountCents = order.amountCents,
-            currency = order.currency,
-            status = PaymentStatus.PROCESSING,
-            providerIdempotencyKey = providerIdempotencyKey
-        )
-
-        val savedPayment = paymentRepository.save(paymentEntity)
-
+        val payment = tx.execute {
+            val order = loadOrderWithLock(command.orderId)
+            if (order.userId != userId) throw OrderNotFoundException(command.orderId)
+            validateOrderForPayment(order)
+            attemptGuard.reserve(order.id, reservation.record.id)
+            val saved = paymentRepository.saveAndFlush(PaymentEntity(
+                orderId = order.id, userId = userId, amountCents = order.amountCents,
+                currency = order.currency, status = PaymentStatus.PROCESSING,
+                providerIdempotencyKey = "${reservation.record.id}_${order.id}"
+            ))
+            val record = idempotencyRecordRepository.findByIdWithLock(reservation.record.id)
+                ?: error("Idempotency record not found")
+            record.resourceId = saved.id
+            idempotencyRecordRepository.save(record)
+            saved
+        } ?: error("Payment preparation failed")
+        // The resource, request parameters and provider key have committed before Stripe is called.
         try {
-            val providerRequest = PaymentProviderPort.CreatePaymentIntentRequest(
-                amountCents = order.amountCents,
-                currency = order.currency,
-                orderId = command.orderId,
-                providerIdempotencyKey = providerIdempotencyKey,
-                metadata = mapOf(
-                    "order_id" to command.orderId.toString(),
-                    "payment_id" to savedPayment.id.toString()
-                )
-            )
-
-            val providerResponse = paymentProviderPort.createPaymentIntent(providerRequest)
-
-            savedPayment.providerPaymentId = providerResponse.providerPaymentId
-            savedPayment.status = mapStripeStatusToPaymentStatus(providerResponse.status)
-            paymentRepository.save(savedPayment)
-
-            val responseJson = objectMapper.writeValueAsString(
-                mapOf(
-                    "paymentId" to savedPayment.id,
-                    "clientSecret" to providerResponse.clientSecret,
-                    "status" to savedPayment.status.name
-                )
-            )
-
-            idempotencyService.markAsCompleted(
-                recordId = reservation.record.id,
-                httpStatus = 201,
-                responseBody = responseJson,
-                resourceId = savedPayment.id
-            )
-
-            // Publish payment created event
-            outboxService.publishEvent(
-                aggregateId = savedPayment.id,
-                aggregateType = "Payment",
-                eventType = "PaymentCreated",
-                payload = mapOf(
-                    "paymentId" to savedPayment.id,
-                    "orderId" to savedPayment.orderId,
-                    "userId" to savedPayment.userId,
-                    "amountCents" to savedPayment.amountCents,
-                    "currency" to savedPayment.currency,
-                    "status" to savedPayment.status.name
-                )
-            )
-
-            return CreatePaymentResult(
-                payment = toDomain(savedPayment),
-                clientSecret = providerResponse.clientSecret,
-                isCached = false
-            )
-
+            val response = paymentProviderPort.createPaymentIntent(PaymentProviderPort.CreatePaymentIntentRequest(
+                amountCents = payment.amountCents, currency = payment.currency, orderId = payment.orderId,
+                providerIdempotencyKey = requireNotNull(payment.providerIdempotencyKey),
+                metadata = mapOf("order_id" to payment.orderId.toString(), "payment_id" to payment.id.toString())
+            ))
+            return tx.execute {
+                val saved = paymentRepository.findByIdWithLock(payment.id) ?: error("Payment not found")
+                saved.providerPaymentId = response.providerPaymentId
+                saved.status = mapStripeStatusToPaymentStatus(response.status)
+                paymentRepository.save(saved)
+                val responseJson = objectMapper.writeValueAsString(mapOf(
+                    "paymentId" to saved.id, "clientSecret" to response.clientSecret, "status" to saved.status.name
+                ))
+                idempotencyService.markAsCompleted(reservation.record.id, 201, responseJson, saved.id)
+                outboxService.publishEvent(saved.id, "Payment", "PaymentCreated", mapOf(
+                    "paymentId" to saved.id, "orderId" to saved.orderId, "userId" to saved.userId,
+                    "amountCents" to saved.amountCents, "currency" to saved.currency, "status" to saved.status.name
+                ))
+                if (saved.status == PaymentStatus.CANCELED) attemptGuard.releaseForCanceled(saved)
+                CreatePaymentResult(toDomain(saved), response.clientSecret, false)
+            } ?: error("Payment completion failed")
         } catch (e: Exception) {
+            // Do not declare a timeout or lost response a failure; reconciliation reuses the same key.
             metricsService.incrementPaymentFailed()
-            savedPayment.status = PaymentStatus.FAILED
-            savedPayment.failureCode = "PROVIDER_ERROR"
-            savedPayment.failureMessage = e.message
-            paymentRepository.save(savedPayment)
-
-            idempotencyService.markAsFailed(reservation.record.id)
-
-            logger.error("Payment creation failed for order ${command.orderId}", e)
+            logger.error("Payment outcome unknown for order ${command.orderId}; reconciliation required", e)
             throw e
         } finally {
-            val duration = System.currentTimeMillis() - startTime
-            metricsService.recordPaymentProcessingDuration(duration)
+            metricsService.recordPaymentProcessingDuration(System.currentTimeMillis() - startTime)
         }
     }
 

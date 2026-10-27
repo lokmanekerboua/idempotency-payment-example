@@ -41,38 +41,17 @@ class IdempotencyService(
         val now = Instant.now()
         val expiresAt = now.plus(paymentProperties.idempotency.keyTtl)
 
-        val existingRecord = idempotencyRecordRepository.findValidRecord(
-            userId = userId,
-            operationType = operationType,
-            idempotencyKey = idempotencyKey,
-            now = now
+        // The unique constraint and atomic insert arbitrate concurrent requests across instances.
+        val inserted = idempotencyRecordRepository.insertIfAbsent(
+            UUID.randomUUID(), userId, operationType.name, idempotencyKey, requestHash, now, expiresAt
         )
-
-        if (existingRecord != null) {
-            if (existingRecord.requestHash != requestHash) {
-                throw IdempotencyKeyConflictException(userId, operationType.name, idempotencyKey)
-            }
-
-            return ReservationResult(
-                record = toDomain(existingRecord),
-                isNew = false
-            )
+        val record = idempotencyRecordRepository.findByUserIdAndOperationTypeAndIdempotencyKey(
+            userId, operationType, idempotencyKey
+        ) ?: throw IllegalStateException("Idempotency record unavailable after reservation")
+        if (record.requestHash != requestHash) {
+            throw IdempotencyKeyConflictException(userId, operationType.name, idempotencyKey)
         }
-
-        val newRecord = IdempotencyRecordEntity(
-            userId = userId,
-            operationType = operationType,
-            idempotencyKey = idempotencyKey,
-            requestHash = requestHash,
-            processingStatus = ProcessingStatus.IN_PROGRESS,
-            expiresAt = expiresAt
-        )
-
-        val savedRecord = idempotencyRecordRepository.save(newRecord)
-        return ReservationResult(
-            record = toDomain(savedRecord),
-            isNew = true
-        )
+        return ReservationResult(toDomain(record), inserted == 1)
     }
 
     @Transactional
@@ -175,8 +154,12 @@ class IdempotencyService(
         digest.update(operationType.name.toByteArray())
 
         parameters.toSortedMap().forEach { (key, value) ->
-            digest.update(key.toByteArray())
-            digest.update(value.toString().toByteArray())
+            val keyBytes = key.toByteArray(Charsets.UTF_8)
+            val valueBytes = value.toString().toByteArray(Charsets.UTF_8)
+            digest.update(java.nio.ByteBuffer.allocate(4).putInt(keyBytes.size).array())
+            digest.update(keyBytes)
+            digest.update(java.nio.ByteBuffer.allocate(4).putInt(valueBytes.size).array())
+            digest.update(valueBytes)
         }
 
         val hashBytes = digest.digest()

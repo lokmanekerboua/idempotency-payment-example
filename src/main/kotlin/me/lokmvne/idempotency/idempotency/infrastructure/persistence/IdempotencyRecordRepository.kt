@@ -12,6 +12,19 @@ import java.util.UUID
 import jakarta.persistence.LockModeType
 
 interface IdempotencyRecordRepository : JpaRepository<IdempotencyRecordEntity, UUID> {
+    @Modifying
+    @Query(value = """
+        INSERT INTO idempotency_records
+            (id, user_id, operation_type, idempotency_key, request_hash, processing_status, created_at, updated_at, expires_at)
+        VALUES (:id, :userId, :operationType, :idempotencyKey, :requestHash, 'IN_PROGRESS', :now, :now, :expiresAt)
+        ON CONFLICT (user_id, operation_type, idempotency_key) DO NOTHING
+    """, nativeQuery = true)
+    fun insertIfAbsent(
+        @Param("id") id: UUID, @Param("userId") userId: UUID,
+        @Param("operationType") operationType: String, @Param("idempotencyKey") idempotencyKey: UUID,
+        @Param("requestHash") requestHash: String, @Param("now") now: Instant, @Param("expiresAt") expiresAt: Instant
+    ): Int
+
     fun findByUserIdAndOperationTypeAndIdempotencyKey(
         userId: UUID,
         operationType: OperationType,

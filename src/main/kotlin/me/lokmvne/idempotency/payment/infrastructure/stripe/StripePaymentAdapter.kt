@@ -4,6 +4,7 @@ import com.stripe.Stripe
 import com.stripe.exception.StripeException
 import com.stripe.model.PaymentIntent
 import com.stripe.model.Refund
+import com.stripe.net.RequestOptions
 import com.stripe.param.PaymentIntentCancelParams
 import com.stripe.param.PaymentIntentCreateParams
 import com.stripe.param.RefundCreateParams
@@ -28,12 +29,11 @@ class StripePaymentAdapter(
         val params = PaymentIntentCreateParams.builder()
             .setAmount(request.amountCents)
             .setCurrency(request.currency.lowercase())
-            .setMetadata(mapOf("order_id" to request.orderId.toString()))
-            .setIdempotencyKey(request.providerIdempotencyKey)
+            .putAllMetadata(request.metadata)
             .build()
 
         val paymentIntent = try {
-            PaymentIntent.create(params)
+            PaymentIntent.create(params, RequestOptions.builder().setIdempotencyKey(request.providerIdempotencyKey).build())
         } catch (e: StripeException) {
             logger.error("Failed to create Stripe PaymentIntent", e)
             throw PaymentProviderException("Failed to create payment intent: ${e.message}", e)
@@ -69,12 +69,11 @@ class StripePaymentAdapter(
         val params = RefundCreateParams.builder()
             .setPaymentIntent(request.providerPaymentId)
             .setAmount(request.amountCents)
-            .setMetadata(request.metadata)
-            .setIdempotencyKey(request.providerIdempotencyKey)
+            .putAllMetadata(request.metadata)
             .build()
 
         val refund = try {
-            Refund.create(params)
+            Refund.create(params, RequestOptions.builder().setIdempotencyKey(request.providerIdempotencyKey).build())
         } catch (e: StripeException) {
             logger.error("Failed to create Stripe Refund", e)
             throw PaymentProviderException("Failed to create refund: ${e.message}", e)
@@ -87,6 +86,8 @@ class StripePaymentAdapter(
             currency = refund.currency.uppercase()
         )
     }
+
+    override fun retrieveRefundStatus(providerRefundId: String): String = Refund.retrieve(providerRefundId).status
 
     override fun cancelPaymentIntent(providerPaymentId: String): Boolean {
         return try {

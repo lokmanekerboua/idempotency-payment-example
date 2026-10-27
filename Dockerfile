@@ -6,7 +6,7 @@ WORKDIR /app
 COPY build.gradle.kts settings.gradle.kts ./
 COPY src ./src
 
-RUN gradle clean build --no-daemon
+RUN gradle clean bootJar --no-daemon
 
 # Run stage
 FROM eclipse-temurin:21-jre-alpine
@@ -20,7 +20,7 @@ RUN apk add --no-cache curl
 RUN addgroup -S spring && adduser -S spring -G spring
 USER spring:spring
 
-COPY --from=build /app/build/libs/*.jar app.jar
+COPY --from=build /app/build/libs/*-SNAPSHOT.jar app.jar
 
 EXPOSE 8080
 

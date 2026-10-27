@@ -27,7 +27,6 @@ import java.util.UUID
 @EntityListeners(AuditingEntityListener::class)
 data class RefundEntity(
     @Id
-    @GeneratedValue(strategy = GenerationType.UUID)
     val id: UUID = UUID.randomUUID(),
 
     @Column(name = "payment_id", nullable = false)

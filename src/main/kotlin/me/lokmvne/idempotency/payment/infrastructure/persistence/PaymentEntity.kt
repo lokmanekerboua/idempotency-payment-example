@@ -32,7 +32,6 @@ import java.util.UUID
 @EntityListeners(AuditingEntityListener::class)
 data class PaymentEntity(
     @Id
-    @GeneratedValue(strategy = GenerationType.UUID)
     val id: UUID = UUID.randomUUID(),
 
     @Column(name = "order_id", nullable = false)
@@ -77,6 +76,8 @@ data class PaymentEntity(
     @Version
     var version: Long = 0
 ) {
+    fun isTerminal(): Boolean = status in setOf(PaymentStatus.SUCCEEDED, PaymentStatus.FAILED, PaymentStatus.CANCELED)
+
     @PrePersist
     @PreUpdate
     fun validateAmount() {

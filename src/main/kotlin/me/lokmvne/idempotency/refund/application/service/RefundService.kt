@@ -8,7 +8,6 @@ import me.lokmvne.idempotency.payment.domain.model.Payment
 import me.lokmvne.idempotency.payment.infrastructure.persistence.PaymentEntity
 import me.lokmvne.idempotency.payment.infrastructure.persistence.PaymentRepository
 import me.lokmvne.idempotency.refund.domain.enum.RefundStatus
-import me.lokmvne.idempotency.refund.domain.exception.RefundAmountExceededException
 import me.lokmvne.idempotency.refund.domain.model.Refund
 import me.lokmvne.idempotency.refund.infrastructure.persistence.RefundEntity
 import me.lokmvne.idempotency.refund.infrastructure.persistence.RefundRepository
@@ -22,6 +21,8 @@ class RefundService(
     private val refundRepository: RefundRepository,
     private val paymentRepository: PaymentRepository,
     private val idempotencyService: IdempotencyService,
+    private val idempotencyRecordRepository: me.lokmvne.idempotency.idempotency.infrastructure.persistence.IdempotencyRecordRepository,
+    private val tx: org.springframework.transaction.support.TransactionTemplate,
     private val paymentProviderPort: me.lokmvne.idempotency.payment.application.port.output.PaymentProviderPort
 ) {
     private val logger = LoggerFactory.getLogger(RefundService::class.java)
@@ -37,12 +38,21 @@ class RefundService(
         val isCached: Boolean
     )
 
-    @Transactional
     fun createRefund(
         command: CreateRefundCommand,
         idempotencyKey: UUID
     ): CreateRefundResult {
         val userId = command.userId
+
+        val reservation = idempotencyService.reserveIdempotencyKey(
+            userId = userId,
+            operationType = OperationType.CREATE_REFUND,
+            idempotencyKey = idempotencyKey,
+            requestParameters = mapOf(
+                "paymentId" to command.paymentId.toString(),
+                "amountCents" to command.amountCents
+            )
+        )
 
         val cachedResponse = idempotencyService.getCachedResponse(
             userId = userId,
@@ -59,16 +69,6 @@ class RefundService(
             )
         }
 
-        val reservation = idempotencyService.reserveIdempotencyKey(
-            userId = userId,
-            operationType = OperationType.CREATE_REFUND,
-            idempotencyKey = idempotencyKey,
-            requestParameters = mapOf(
-                "paymentId" to command.paymentId.toString(),
-                "amountCents" to command.amountCents
-            )
-        )
-
         if (!reservation.isNew) {
             throw me.lokmvne.idempotency.idempotency.domain.exception.IdempotencyKeyConflictException(
                 userId,
@@ -77,84 +77,52 @@ class RefundService(
             )
         }
 
-        val payment = loadPaymentWithLock(command.paymentId)
-        validatePaymentForRefund(payment, command.amountCents)
-
-        val existingRefunds = refundRepository.findByPaymentId(command.paymentId)
-        val totalRefunded = existingRefunds
-            .filter { it.status == RefundStatus.SUCCEEDED }
-            .sumOf { it.amountCents }
-
-        val pendingRefunds = existingRefunds
-            .filter { it.status == RefundStatus.PENDING }
-            .sumOf { it.amountCents }
-
-        val maxRefundable = payment.amountCents - totalRefunded - pendingRefunds
-
-        if (command.amountCents > maxRefundable) {
-            throw RefundAmountExceededException(
-                paymentId = command.paymentId,
-                requestedAmount = command.amountCents,
-                refundableAmount = maxRefundable
+        val prepared = tx.execute {
+            val payment = loadPaymentWithLock(command.paymentId)
+            if (payment.userId != userId) throw PaymentNotFoundException(command.paymentId)
+            require(command.amountCents > 0) { "Refund amount must be positive" }
+            validatePaymentForRefund(payment, command.amountCents)
+            val reserved = refundRepository.findByPaymentId(command.paymentId)
+                .filter { it.status == RefundStatus.SUCCEEDED || it.status == RefundStatus.PENDING }
+                .sumOf { it.amountCents }
+            val maxRefundable = payment.amountCents - reserved
+            if (command.amountCents > maxRefundable) throw RefundAmountExceededException(
+                command.paymentId, command.amountCents, maxRefundable
             )
-        }
-
-        val providerIdempotencyKey = "${reservation.record.id}_${command.paymentId}"
-
-        val refundEntity = RefundEntity(
-            paymentId = command.paymentId,
-            userId = userId,
-            amountCents = command.amountCents,
-            currency = payment.currency,
-            status = RefundStatus.PENDING,
-            providerIdempotencyKey = providerIdempotencyKey
-        )
-
-        val savedRefund = refundRepository.save(refundEntity)
-
+            val providerPaymentId = requireNotNull(payment.providerPaymentId)
+            val saved = refundRepository.saveAndFlush(RefundEntity(
+                paymentId = payment.id, userId = userId, amountCents = command.amountCents,
+                currency = payment.currency, status = RefundStatus.PENDING,
+                providerIdempotencyKey = "${reservation.record.id}_${payment.id}"
+            ))
+            val record = idempotencyRecordRepository.findByIdWithLock(reservation.record.id)
+                ?: error("Idempotency record not found")
+            record.resourceId = saved.id
+            idempotencyRecordRepository.save(record)
+            saved to providerPaymentId
+        } ?: error("Refund preparation failed")
+        val (refund, providerPaymentId) = prepared
         try {
-            val providerRequest = me.lokmvne.idempotency.payment.application.port.output.PaymentProviderPort.CreateRefundRequest(
-                providerPaymentId = payment.providerPaymentId!!,
-                amountCents = command.amountCents,
-                providerIdempotencyKey = providerIdempotencyKey,
-                metadata = mapOf(
-                    "payment_id" to command.paymentId.toString(),
-                    "refund_id" to savedRefund.id.toString()
+            val response = paymentProviderPort.createRefund(
+                me.lokmvne.idempotency.payment.application.port.output.PaymentProviderPort.CreateRefundRequest(
+                    providerPaymentId = providerPaymentId, amountCents = refund.amountCents,
+                    providerIdempotencyKey = requireNotNull(refund.providerIdempotencyKey),
+                    metadata = mapOf("payment_id" to refund.paymentId.toString(), "refund_id" to refund.id.toString())
                 )
             )
-
-            val providerResponse = paymentProviderPort.createRefund(providerRequest)
-
-            savedRefund.providerRefundId = providerResponse.providerRefundId
-            savedRefund.status = mapStripeStatusToRefundStatus(providerResponse.status)
-            refundRepository.save(savedRefund)
-
-            val responseJson = com.fasterxml.jackson.databind.ObjectMapper().writeValueAsString(
-                mapOf(
-                    "refundId" to savedRefund.id,
-                    "status" to savedRefund.status.name
+            return tx.execute {
+                val saved = refundRepository.findByIdWithLock(refund.id) ?: error("Refund not found")
+                saved.providerRefundId = response.providerRefundId
+                saved.status = mapStripeStatusToRefundStatus(response.status)
+                refundRepository.save(saved)
+                val body = com.fasterxml.jackson.databind.ObjectMapper().writeValueAsString(
+                    mapOf("refundId" to saved.id, "status" to saved.status.name)
                 )
-            )
-
-            idempotencyService.markAsCompleted(
-                recordId = reservation.record.id,
-                httpStatus = 201,
-                responseBody = responseJson,
-                resourceId = savedRefund.id
-            )
-
-            return CreateRefundResult(
-                refund = toDomain(savedRefund),
-                isCached = false
-            )
-
+                idempotencyService.markAsCompleted(reservation.record.id, 201, body, saved.id)
+                CreateRefundResult(toDomain(saved), false)
+            } ?: error("Refund completion failed")
         } catch (e: Exception) {
-            savedRefund.status = RefundStatus.FAILED
-            refundRepository.save(savedRefund)
-
-            idempotencyService.markAsFailed(reservation.record.id)
-
-            logger.error("Refund creation failed for payment ${command.paymentId}", e)
+            logger.error("Refund outcome unknown for payment ${command.paymentId}; reconciliation required", e)
             throw e
         }
     }

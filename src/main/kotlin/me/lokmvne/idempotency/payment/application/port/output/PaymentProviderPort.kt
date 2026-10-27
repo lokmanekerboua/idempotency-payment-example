@@ -48,5 +48,7 @@ interface PaymentProviderPort {
 
     fun createRefund(request: CreateRefundRequest): CreateRefundResponse
 
+    fun retrieveRefundStatus(providerRefundId: String): String
+
     fun cancelPaymentIntent(providerPaymentId: String): Boolean
 }
