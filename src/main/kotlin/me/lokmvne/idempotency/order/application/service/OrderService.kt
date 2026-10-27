@@ -55,7 +55,6 @@ class OrderService(
         val updatedOrder = order.markAsPaid()
 
         orderEntity.status = updatedOrder.status
-        orderEntity.version = updatedOrder.version
 
         val savedOrder = orderRepository.save(orderEntity)
         return toDomain(savedOrder)
@@ -67,7 +66,7 @@ class OrderService(
 
     private fun toDomain(entity: OrderEntity): Order {
         return Order(
-            id = entity.id,
+            id = requireNotNull(entity.id),
             userId = entity.userId,
             orderReference = entity.orderReference,
             amountCents = entity.amountCents,

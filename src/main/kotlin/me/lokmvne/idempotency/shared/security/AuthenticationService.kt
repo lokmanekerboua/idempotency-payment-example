@@ -54,7 +54,7 @@ class AuthenticationService(
 
         return AuthResponse(
             token = token,
-            userId = savedUser.id,
+            userId = requireNotNull(savedUser.id),
             email = savedUser.email,
             role = savedUser.role
         )
@@ -72,7 +72,7 @@ class AuthenticationService(
 
         return AuthResponse(
             token = token,
-            userId = user.id,
+            userId = requireNotNull(user.id),
             email = user.email,
             role = user.role
         )
@@ -84,7 +84,7 @@ class AuthenticationService(
         val expiryDate = Date(now.time + jwtProperties.jwt.expiration.toMillis())
 
         return Jwts.builder()
-            .setSubject(user.id.toString())
+            .setSubject(requireNotNull(user.id).toString())
             .claim("email", user.email)
             .claim("roles", listOf(user.role.name))
             .setIssuedAt(now)

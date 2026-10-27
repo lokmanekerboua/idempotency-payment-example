@@ -85,7 +85,7 @@ class PaymentService(
             val order = loadOrderWithLock(command.orderId)
             if (order.userId != userId) throw OrderNotFoundException(command.orderId)
             validateOrderForPayment(order)
-            attemptGuard.reserve(order.id, reservation.record.id)
+            attemptGuard.reserve(requireNotNull(order.id), reservation.record.id)
             val saved = paymentRepository.saveAndFlush(PaymentEntity(
                 orderId = order.id, userId = userId, amountCents = order.amountCents,
                 currency = order.currency, status = PaymentStatus.PROCESSING,
@@ -160,7 +160,7 @@ class PaymentService(
             )
         }
 
-        val existingPayment = paymentRepository.findSuccessfulPaymentByOrderId(order.id)
+        val existingPayment = paymentRepository.findSuccessfulPaymentByOrderId(requireNotNull(order.id))
         if (existingPayment != null) {
             throw IllegalStateException("Order ${order.id} already has a successful payment")
         }

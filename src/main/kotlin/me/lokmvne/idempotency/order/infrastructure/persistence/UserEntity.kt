@@ -18,7 +18,7 @@ enum class UserRole {
 data class UserEntity(
     @Id
     @GeneratedValue(strategy = GenerationType.UUID)
-    val id: UUID = UUID.randomUUID(),
+    val id: UUID? = null,
 
     @Column(nullable = false, unique = true, length = 255)
     val email: String,
